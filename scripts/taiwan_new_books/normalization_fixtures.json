@@ -1,0 +1,20 @@
+{
+  "normalization_version": 1,
+  "text": [
+    {"input": "「臺灣」：書名／作者，測試。", "expected": "臺灣 書名 作者 測試"},
+    {"input": "ＡＢＣ１２３（全形）", "expected": "abc123 全形"},
+    {"input": "  王\t小明\n　著  ", "expected": "王 小明 著"},
+    {"input": "PageKEEP AbC", "expected": "pagekeep abc"},
+    {"input": "書—名・續篇", "expected": "書 名 續篇"}
+  ],
+  "isbn": [
+    {"input": "ISBN-13：９７８－０－３０６－４０６１５－７", "isbn10": null, "isbn13": "9780306406157", "comparison": "9780306406157"},
+    {"input": " ISBN13: 978 0 306 40615 7 ", "isbn10": null, "isbn13": "9780306406157", "comparison": "9780306406157"},
+    {"input": "ISBN 0-8044-2957-x", "isbn10": "080442957X", "isbn13": null, "comparison": "9780804429573"},
+    {"input": "ISBN-10: 0–306–40615–2", "isbn10": "0306406152", "isbn13": null, "comparison": "9780306406157"},
+    {"input": "9780306406158", "isbn10": null, "isbn13": null, "comparison": null},
+    {"input": "0804429570", "isbn10": null, "isbn13": null, "comparison": null},
+    {"input": "0000000000000", "isbn10": null, "isbn13": null, "comparison": null},
+    {"input": "不詳", "isbn10": null, "isbn13": null, "comparison": null}
+  ]
+}

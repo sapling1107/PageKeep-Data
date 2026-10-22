@@ -1,0 +1,160 @@
+name: Build Taiwan New Books index
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 5,15 * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: taiwan-new-books-index
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: taiwan-new-books-index
+      OUTPUT_DIR: build/taiwan-new-books-index
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run builder tests
+        run: python3 -m unittest discover -s scripts/taiwan_new_books -p "test_*.py"
+
+      - name: Build and validate index
+        run: python3 scripts/taiwan_new_books/build_index.py --output-dir "$OUTPUT_DIR"
+
+      - name: Compare with published manifest
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Recover a first publish interrupted after release/data creation but before manifest.
+          gh release view "$RELEASE_TAG" --json assets > build/published-assets.json
+          if ! python3 - <<'PY'
+          import json
+          from pathlib import Path
+          assets = json.loads(Path("build/published-assets.json").read_text())["assets"]
+          raise SystemExit(0 if any(a["name"] == "taiwan-new-books-manifest.json" for a in assets) else 1)
+          PY
+          then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p build/published-index
+          gh release download "$RELEASE_TAG" \
+            --pattern taiwan-new-books-manifest.json \
+            --dir build/published-index \
+            --clobber
+          python3 - \
+            build/published-index/taiwan-new-books-manifest.json \
+            "$OUTPUT_DIR/taiwan-new-books-manifest.json" \
+            "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          previous = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          current = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          changed = (
+              previous.get("content_version") != current["content_version"]
+              or previous.get("gzip_sha256") != current["gzip_sha256"]
+          )
+          with Path(sys.argv[3]).open("a", encoding="utf-8") as output:
+              output.write(f"changed={'true' if changed else 'false'}\n")
+          PY
+
+      - name: Create fixed data release if needed
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "Taiwan New Books index" \
+              --notes "Standalone NCL pre-publication ISBN data; exact resource coverage and OGDL attribution are in the manifest."
+          fi
+
+      - name: Upload immutable data asset
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_ASSET=$(python3 -c 'import json,os; print(json.load(open(os.environ["OUTPUT_DIR"] + "/taiwan-new-books-manifest.json"))["data_asset"])')
+          gh release view "$RELEASE_TAG" --json assets > build/release-assets.json
+          if ! python3 - "$DATA_ASSET" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          names = {asset["name"] for asset in json.loads(Path("build/release-assets.json").read_text())["assets"]}
+          sys.exit(0 if sys.argv[1] in names else 1)
+          PY
+          then
+            gh release upload "$RELEASE_TAG" "$OUTPUT_DIR/$DATA_ASSET"
+          fi
+          # A rerun after interruption reuses the immutable asset only if its bytes match.
+          # Verify the fully uploaded bytes before touching the stable manifest.
+          mkdir -p build/verify-upload
+          gh release download "$RELEASE_TAG" --pattern "$DATA_ASSET" --dir build/verify-upload
+          python3 - "$OUTPUT_DIR/taiwan-new-books-manifest.json" "build/verify-upload/$DATA_ASSET" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts/taiwan_new_books")
+          from build_index import sha256_file
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          existing = Path(sys.argv[2])
+          if existing.stat().st_size != manifest["compressed_size"] or sha256_file(existing) != manifest["gzip_sha256"]:
+              raise SystemExit("Immutable release asset conflict; stable manifest was not changed")
+          PY
+
+      - name: Archive immutable manifest for rollback
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Archive both the incoming and any previous stable pointer (including format v1).
+          for MANIFEST_PATH in "$OUTPUT_DIR/taiwan-new-books-manifest.json" build/published-index/taiwan-new-books-manifest.json; do
+            if [ ! -f "$MANIFEST_PATH" ]; then continue; fi
+            MANIFEST_HASH=$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$MANIFEST_PATH")
+            ARCHIVE_ASSET="taiwan-new-books-manifest-$MANIFEST_HASH.json"
+            cp "$MANIFEST_PATH" "build/$ARCHIVE_ASSET"
+            gh release view "$RELEASE_TAG" --json assets > build/rollback-assets.json
+            if ! python3 - "$ARCHIVE_ASSET" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          names = {a["name"] for a in json.loads(Path("build/rollback-assets.json").read_text())["assets"]}
+          raise SystemExit(0 if sys.argv[1] in names else 1)
+          PY
+            then
+              gh release upload "$RELEASE_TAG" "build/$ARCHIVE_ASSET"
+            fi
+            gh release download "$RELEASE_TAG" --pattern "$ARCHIVE_ASSET" --dir build/verify-upload
+            cmp "build/$ARCHIVE_ASSET" "build/verify-upload/$ARCHIVE_ASSET"
+          done
+
+      - name: Publish stable manifest LAST
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The referenced content-versioned asset has already been uploaded and read back.
+          # Older assets are retained for rollback. Only this pointer is replaced.
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$OUTPUT_DIR/taiwan-new-books-manifest.json"
